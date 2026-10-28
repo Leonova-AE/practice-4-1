@@ -1,69 +1,120 @@
+
 import './styles.css';
-import { Book } from './task1-types';
+import type { Book } from './task1-types';
 import { applyFilters, filterByAuthor, filterByMinYear } from './task3-filters';
-import { createBookFromForm } from "./task4-integration";
+import { createBookFromForm } from './task4-integration';
 import { filterByTitle, sortBooks } from './task5-utils';
 import { BookCatalog } from './task6-classes';
 import { Wishlist } from './task7-wishlist';
+import { fetchBooks, saveBooks } from './mock-api';
 
 // ============================================================
-// ИСХОДНОЕ СОСТОЯНИЕ
+// СОСТОЯНИЕ ПРИЛОЖЕНИЯ
 // ============================================================
-let catalog = new BookCatalog('main', [
-  { id: '1', title: 'TypeScript Guide', authors: ['John Doe'], year: 2024 },
-  { id: '2', title: 'JavaScript Basics', authors: ['Jane Smith'], year: 2022 },
-]);
 
+type AsyncState<T> =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'success'; data: T }
+  | { status: 'error'; message: string };
+
+let state: AsyncState<Book[]> = { status: 'idle' };
+
+let catalog = new BookCatalog('main', []);
 let wishlist = new Wishlist();
 
-// Загрузка из localStorage (в практике 4-1 переедет в mock-api.ts)
-const savedCatalog = localStorage.getItem('catalog');
-if (savedCatalog) {
-  const parsed = JSON.parse(savedCatalog);
-  catalog = new BookCatalog(parsed.id, parsed.books);
+let saveErrorMessage = '';
+let saving = false;
+let errorTimer: ReturnType<typeof setTimeout> | undefined;
+
+try {
+  const savedWishlist = localStorage.getItem('wishlist');
+  if (savedWishlist) {
+    wishlist = new Wishlist(JSON.parse(savedWishlist));
+  }
+} catch (error) {
+  console.error('Ошибка загрузки избранного:', error);
 }
 
-const savedWishlist = localStorage.getItem('wishlist');
-if (savedWishlist) {
-  wishlist = new Wishlist(JSON.parse(savedWishlist));
-}
-
-// ============================================================
-// СОХРАНЕНИЕ (в практике 4-1 переедет в mock-api.ts)
-// ============================================================
-function saveCatalog() {
-  localStorage.setItem('catalog', JSON.stringify({
-    id: catalog.id,
-    books: catalog.getBooks()
-  }));
-}
-
-function saveWishlist() {
-  localStorage.setItem('wishlist', JSON.stringify(wishlist.getFavoriteIds()));
+function saveWishlist(): void {
+  localStorage.setItem(
+    'wishlist',
+    JSON.stringify(wishlist.getFavoriteIds())
+  );
 }
 
 // ============================================================
-// DOM-элементы
+// DOM-ЭЛЕМЕНТЫ
 // ============================================================
-const bookList = document.querySelector('#bookList') as HTMLDivElement;
-const wishlistContainer = document.querySelector('#wishlistContainer') as HTMLDivElement;
-const form = document.querySelector('#bookForm') as HTMLFormElement;
-const filterBtn = document.querySelector('#applyFilters') as HTMLButtonElement;
-const authorInput = document.querySelector('#filterAuthor') as HTMLInputElement;
-const yearInput = document.querySelector('#filterYear') as HTMLInputElement;
-const errorMessage = document.querySelector('#errorMessage') as HTMLDivElement;
-const searchInput = document.querySelector('#searchInput') as HTMLInputElement;
-const sortBySelect = document.querySelector('#sortBy') as HTMLSelectElement;
+
+const bookList = document.querySelector<HTMLDivElement>('#bookList')!;
+const wishlistContainer = document.querySelector<HTMLDivElement>('#wishlistContainer')!;
+const form = document.querySelector<HTMLFormElement>('#bookForm')!;
+const filterBtn = document.querySelector<HTMLButtonElement>('#applyFilters')!;
+const authorInput = document.querySelector<HTMLInputElement>('#filterAuthor')!;
+const yearInput = document.querySelector<HTMLInputElement>('#filterYear')!;
+const formErrorElement = document.querySelector<HTMLDivElement>('#errorMessage')!;
+const searchInput = document.querySelector<HTMLInputElement>('#searchInput')!;
+const sortBySelect = document.querySelector<HTMLSelectElement>('#sortBy')!;
 
 // ============================================================
-// СОЗДАНИЕ КАРТОЧКИ
+// ОТОБРАЖЕНИЕ ОШИБОК СОХРАНЕНИЯ
 // ============================================================
+
+function showSaveError(message: string): void {
+  saveErrorMessage = message;
+
+  if (errorTimer !== undefined) {
+    clearTimeout(errorTimer);
+  }
+
+  render();
+
+  errorTimer = setTimeout(() => {
+    saveErrorMessage = '';
+    render();
+  }, 3000);
+}
+
+// ============================================================
+// АСИНХРОННОЕ СОХРАНЕНИЕ
+// ============================================================
+
+async function persistBooks(newBooks: Book[]): Promise<boolean> {
+  if (saving || state.status !== 'success') return false;
+
+  saving = true;
+
+  try {
+    await saveBooks(newBooks);
+
+    catalog = new BookCatalog('main', newBooks);
+    state = { status: 'success', data: newBooks };
+
+    render();
+    return true;
+  } catch (error) {
+    showSaveError(
+      error instanceof Error ? error.message : 'Не удалось сохранить книги'
+    );
+    return false;
+  } finally {
+    saving = false;
+  }
+}
+
+// ============================================================
+// КАРТОЧКА КНИГИ
+// ============================================================
+
 function createBookCard(book: Book): HTMLDivElement {
   const card = document.createElement('div');
   card.className = 'book-card';
 
   const titleEl = document.createElement('h3');
-  titleEl.textContent = `${book.title} — ${book.authors.join(', ')}${book.year ? `, ${book.year}` : ''}`;
+  titleEl.textContent =
+    `${book.title} — ${book.authors.join(', ')}${book.year ? `, ${book.year}` : ''}`;
+
   card.append(titleEl);
 
   if (book.rating !== undefined) {
@@ -72,33 +123,41 @@ function createBookCard(book: Book): HTMLDivElement {
     card.append(ratingEl);
   }
 
-  // Кнопка «Удалить»
   const deleteBtn = document.createElement('button');
   deleteBtn.textContent = 'Удалить';
-  deleteBtn.addEventListener('click', () => {
-    catalog.removeBook(book.id);
-    saveCatalog();
-    updateView();
+  deleteBtn.disabled = saving;
+
+  deleteBtn.addEventListener('click', async () => {
+    if (state.status !== 'success' || saving) return;
+
+    const newBooks = state.data.filter(item => item.id !== book.id);
+
+    await persistBooks(newBooks);
   });
+
   card.append(deleteBtn);
 
-  // Кнопка «Избранное» 
   const favBtn = document.createElement('button');
-  favBtn.textContent = wishlist.has(book.id) ? '❤️ В избранном' : '🤍 В избранное';
+  favBtn.textContent = wishlist.has(book.id)
+    ? '❤️ В избранном'
+    : '🤍 В избранное';
+
   favBtn.addEventListener('click', () => {
     wishlist.toggle(book.id);
     saveWishlist();
-    updateView();
+    render();
   });
+
   card.append(favBtn);
 
   return card;
 }
 
 // ============================================================
-// ОТРИСОВКА
+// ОТРИСОВКА СПИСКА
 // ============================================================
-function renderBooks(books: Book[]) {
+
+function renderBooks(books: Book[]): void {
   bookList.innerHTML = '';
 
   if (books.length === 0) {
@@ -111,8 +170,9 @@ function renderBooks(books: Book[]) {
   });
 }
 
-function renderWishlist() {
+function renderWishlist(): void {
   wishlistContainer.innerHTML = '';
+
   const favBooks = wishlist.getFavorites(catalog);
 
   if (favBooks.length === 0) {
@@ -125,47 +185,145 @@ function renderWishlist() {
   });
 }
 
-// Единая функция обновления вида
-function updateView() {
-  const filters: ((book: Book) => boolean)[] = [];
-  if (authorInput.value.trim()) filters.push(filterByAuthor(authorInput.value.trim()));
-  if (yearInput.value) filters.push(filterByMinYear(parseInt(yearInput.value, 10)));
-  if (searchInput.value.trim()) filters.push(filterByTitle(searchInput.value.trim()));
+// ============================================================
+// ФИЛЬТРАЦИЯ И СОРТИРОВКА
+// ============================================================
 
-  const allBooks = catalog.getBooks();
-  const filtered = applyFilters(allBooks, filters);
-  const sorted = sortBooks(filtered, sortBySelect.value as 'year' | 'rating');
+function updateView(books: Book[]): void {
+  const filters: ((book: Book) => boolean)[] = [];
+
+  if (authorInput.value.trim()) {
+    filters.push(filterByAuthor(authorInput.value.trim()));
+  }
+
+  if (yearInput.value) {
+    filters.push(filterByMinYear(parseInt(yearInput.value, 10)));
+  }
+
+  if (searchInput.value.trim()) {
+    filters.push(filterByTitle(searchInput.value.trim()));
+  }
+
+  const filtered = applyFilters(books, filters);
+  const sorted = sortBooks(
+    filtered,
+    sortBySelect.value as 'year' | 'rating'
+  );
 
   renderBooks(sorted);
   renderWishlist();
 }
 
-// Первичная отрисовка
-updateView();
+// ============================================================
+// ПАТТЕРН ASYNCSTATE И ГЛАВНАЯ ФУНКЦИЯ RENDER
+// ============================================================
+
+function render(): void {
+  formErrorElement.textContent = saveErrorMessage;
+
+  switch (state.status) {
+    case 'idle':
+      bookList.textContent = 'Подготовка приложения...';
+      wishlistContainer.innerHTML = '';
+      break;
+
+    case 'loading':
+      bookList.textContent = '⏳ Загрузка данных...';
+      wishlistContainer.innerHTML = '';
+      break;
+
+    case 'success':
+      updateView(state.data);
+      break;
+
+    case 'error': {
+      bookList.innerHTML = '';
+      wishlistContainer.innerHTML = '';
+
+      const errorBlock = document.createElement('div');
+      errorBlock.style.color = '#dc2626';
+
+      const message = document.createElement('p');
+      message.textContent = state.message;
+
+      const retryBtn = document.createElement('button');
+      retryBtn.textContent = 'Повторить попытку';
+      retryBtn.addEventListener('click', () => {
+        void initApp();
+      });
+
+      errorBlock.append(message, retryBtn);
+      bookList.append(errorBlock);
+      break;
+    }
+  }
+}
 
 // ============================================================
-// ОБРАБОТЧИК ФОРМЫ
+// АСИНХРОННАЯ ИНИЦИАЛИЗАЦИЯ
 // ============================================================
-form.addEventListener('submit', (e) => {
-  e.preventDefault();
-  errorMessage.textContent = '';
+
+async function initApp(): Promise<void> {
+  state = { status: 'loading' };
+  render();
+
+  try {
+    const books = await fetchBooks();
+
+    catalog = new BookCatalog('main', books);
+    state = { status: 'success', data: books };
+  } catch (error) {
+    state = {
+      status: 'error',
+      message: error instanceof Error
+        ? error.message
+        : 'Неизвестная ошибка'
+    };
+  }
+
+  render();
+}
+
+// ============================================================
+// АСИНХРОННОЕ ДОБАВЛЕНИЕ КНИГИ
+// ============================================================
+
+form.addEventListener('submit', async (event) => {
+  event.preventDefault();
+
+  if (state.status !== 'success' || saving) return;
+
+  saveErrorMessage = '';
+
   try {
     const formData = new FormData(form);
     const newBook = createBookFromForm(formData);
-    catalog.addBook(newBook);
-    saveCatalog();
-    form.reset();
-    updateView();
-  } catch (error) {
-    if (error instanceof Error) {
-      errorMessage.textContent = error.message;
+
+    const newBooks = [...state.data, newBook];
+
+    const saved = await persistBooks(newBooks);
+
+    if (saved) {
+      form.reset();
+      render();
     }
+  } catch (error) {
+    showSaveError(
+      error instanceof Error ? error.message : 'Ошибка добавления книги'
+    );
   }
 });
 
 // ============================================================
-// ФИЛЬТРЫ И СОРТИРОВКА
+// ФИЛЬТРЫ И ПОИСК
 // ============================================================
-filterBtn.addEventListener('click', updateView);
-searchInput.addEventListener('input', updateView);
-sortBySelect.addEventListener('change', updateView);
+
+filterBtn.addEventListener('click', render);
+searchInput.addEventListener('input', render);
+sortBySelect.addEventListener('change', render);
+
+// ============================================================
+// ЗАПУСК
+// ============================================================
+
+void initApp();
